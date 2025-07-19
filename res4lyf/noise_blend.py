@@ -5,49 +5,61 @@ Provides SwarmUI-style variation seed functionality for RES4LYF samplers
 
 import torch
 import numpy as np
+import importlib.util
 import sys
 import os
 
-# Add parent directory to path to import from ComfyUI-RES4LYF
-comfy_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-res4lyf_paths = [
-    os.path.join(comfy_path, "ComfyUI-RES4LYF"),
-    os.path.join(comfy_path, "RES4LYF"),
-    os.path.join(comfy_path, "comfyui-res4lyf"),
-    os.path.join(comfy_path, "res4lyf")
-]
-
-res4lyf_found = False
-for path in res4lyf_paths:
-    if os.path.exists(path) and path not in sys.path:
-        sys.path.insert(0, path)
-        res4lyf_found = True
-        print(f"[RES4LYF Noise Blend] Added path: {path}")
-        break
-
-if not res4lyf_found:
-    print("[RES4LYF Noise Blend] Warning: Could not find RES4LYF installation")
-
-# Try to import from RES4LYF
-try:
-    from noise_classes import prepare_noise, NOISE_GENERATOR_CLASSES_SIMPLE
-    print("[RES4LYF Noise Blend] Successfully imported from RES4LYF")
-except ImportError as e:
-    print(f"[RES4LYF Noise Blend] Import error: {e}")
-    # Fallback - define minimal noise generator
-    NOISE_GENERATOR_CLASSES_SIMPLE = {}
+# Check if RES4LYF is available
+def check_res4lyf_installed():
+    """Check if RES4LYF is installed and return the module"""
+    # Try direct import first
+    try:
+        import noise_classes
+        return noise_classes
+    except ImportError:
+        pass
     
-    class GaussianNoise:
-        def __init__(self, x, seed, sigma_min, sigma_max):
-            self.shape = x.shape
-            self.seed = seed
-            
-        def __call__(self, sigma, sigma_next):
-            torch.manual_seed(self.seed)
-            return torch.randn(self.shape, device="cpu")
+    # Check common installation paths
+    comfy_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    possible_paths = [
+        os.path.join(comfy_path, "ComfyUI-RES4LYF"),
+        os.path.join(comfy_path, "RES4LYF"),
+        os.path.join(comfy_path, "res4lyf"),
+    ]
     
-    NOISE_GENERATOR_CLASSES_SIMPLE["gaussian"] = GaussianNoise
-    print("[RES4LYF Noise Blend] Using fallback gaussian noise generator")
+    for res4lyf_path in possible_paths:
+        noise_classes_path = os.path.join(res4lyf_path, "noise_classes.py")
+        if os.path.exists(noise_classes_path):
+            # Load the module dynamically
+            spec = importlib.util.spec_from_file_location("noise_classes", noise_classes_path)
+            if spec and spec.loader:
+                noise_classes = importlib.util.module_from_spec(spec)
+                sys.modules["noise_classes"] = noise_classes
+                spec.loader.exec_module(noise_classes)
+                print(f"[RES4LYF Noise Blend] Loaded RES4LYF from: {res4lyf_path}")
+                return noise_classes
+    
+    return None
+
+# Try to import RES4LYF
+noise_classes_module = check_res4lyf_installed()
+
+if noise_classes_module is None:
+    raise ImportError(
+        "RES4LYF is required but not found. Please install ComfyUI-RES4LYF:\n"
+        "1. Go to ComfyUI Manager\n"
+        "2. Search for 'RES4LYF'\n"
+        "3. Install 'ComfyUI-RES4LYF'\n"
+        "4. Restart ComfyUI"
+    )
+
+# Import from the loaded module
+prepare_noise = noise_classes_module.prepare_noise
+NOISE_GENERATOR_CLASSES_SIMPLE = noise_classes_module.NOISE_GENERATOR_CLASSES_SIMPLE
+
+# Get the actual available noise types from RES4LYF
+AVAILABLE_NOISE_TYPES = list(NOISE_GENERATOR_CLASSES_SIMPLE.keys())
+print(f"[RES4LYF Noise Blend] Available noise types: {AVAILABLE_NOISE_TYPES}")
 
 
 def slerp(val, low, high):
@@ -88,31 +100,12 @@ class RES4LYFNoiseBlend:
     """
     Blends two noise patterns using spherical linear interpolation (SLERP).
     This provides SwarmUI-style variation seed functionality.
+    Requires RES4LYF to be installed.
     """
     
     @classmethod
     def INPUT_TYPES(s):
-        # Get available noise types
-        available_noise_types = list(NOISE_GENERATOR_CLASSES_SIMPLE.keys()) if NOISE_GENERATOR_CLASSES_SIMPLE else ["gaussian"]
-        
-        # If we have the full RES4LYF noise types, use them all
-        if len(available_noise_types) > 1:
-            # RES4LYF noise types from the source
-            available_noise_types = [
-                "gaussian", "uniform", "brownian", "perlin", "perlin_fractal", 
-                "perlin_new", "studentt", "lognormal", "cauchy", "laplace",
-                "pyramid", "pyramid_fractal", "power", "power_fractal",
-                "simplex", "simplex_fractal", 
-                # Color noises
-                "pink", "brown", "blue", "violet", "green", "red", "velvet",
-                "pink_fractal", "brown_fractal", "blue_fractal", "violet_fractal", 
-                "green_fractal", "red_fractal", "velvet_fractal",
-                # Advanced
-                "gaussian_fractal"
-            ]
-            # Filter to only include types that actually exist
-            available_noise_types = [nt for nt in available_noise_types if nt in NOISE_GENERATOR_CLASSES_SIMPLE]
-        
+        # Use the actual noise types from RES4LYF
         return {
             "required": {
                 "model": ("MODEL",),
@@ -120,7 +113,7 @@ class RES4LYFNoiseBlend:
                 "base_seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "var_seed": ("INT", {"default": 1, "min": 0, "max": 0xffffffffffffffff}),
                 "var_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05}),
-                "noise_type": (available_noise_types, {"default": "gaussian"}),
+                "noise_type": (AVAILABLE_NOISE_TYPES, {"default": "gaussian"}),
                 "normalize": ("BOOLEAN", {"default": True}),
             },
             "optional": {
@@ -136,13 +129,10 @@ class RES4LYFNoiseBlend:
     DESCRIPTION = "Blends two noise patterns for variation seed functionality (SwarmUI-style)"
     
     def blend_noise(self, model, latent, base_seed, var_seed, var_strength, noise_type, normalize, alpha=1.0, k=1.0):
-        # Check if we have the noise generator
-        if noise_type not in NOISE_GENERATOR_CLASSES_SIMPLE:
-            raise ValueError(f"Noise type '{noise_type}' not found. Available types: {list(NOISE_GENERATOR_CLASSES_SIMPLE.keys())}")
-        
-        noise_generator_class = NOISE_GENERATOR_CLASSES_SIMPLE[noise_type]
+        # Get the noise generator class
+        noise_generator_class = NOISE_GENERATOR_CLASSES_SIMPLE.get(noise_type)
         if noise_generator_class is None:
-            raise ValueError(f"Noise generator for type '{noise_type}' is None")
+            raise ValueError(f"Noise type '{noise_type}' not found in RES4LYF")
         
         # Get the latent image tensor
         latent_image = latent["samples"]
@@ -157,44 +147,38 @@ class RES4LYFNoiseBlend:
         for i in range(batch_size):
             # Generate base noise
             torch.manual_seed(base_seed + i)
-            try:
-                noise_sampler_base = noise_generator_class(
-                    x=latent_image[i:i+1], 
-                    seed=base_seed + i, 
-                    sigma_min=sigmin, 
-                    sigma_max=sigmax
-                )
-            except Exception as e:
-                print(f"[RES4LYF Noise Blend] Error creating base noise sampler: {e}")
-                raise
+            noise_sampler_base = noise_generator_class(
+                x=latent_image[i:i+1], 
+                seed=base_seed + i, 
+                sigma_min=sigmin, 
+                sigma_max=sigmax
+            )
             
             # Set fractal parameters if applicable
             if hasattr(noise_sampler_base, 'alpha'):
                 noise_sampler_base.alpha = alpha
+            if hasattr(noise_sampler_base, 'k'):
                 noise_sampler_base.k = k
-                if hasattr(noise_sampler_base, 'scale'):
-                    noise_sampler_base.scale = 0.1
+            if hasattr(noise_sampler_base, 'scale'):
+                noise_sampler_base.scale = 0.1
             
             base_noise = noise_sampler_base(sigma=sigmax, sigma_next=sigmin)
             
             # Generate variation noise
             torch.manual_seed(var_seed + i)
-            try:
-                noise_sampler_var = noise_generator_class(
-                    x=latent_image[i:i+1], 
-                    seed=var_seed + i, 
-                    sigma_min=sigmin, 
-                    sigma_max=sigmax
-                )
-            except Exception as e:
-                print(f"[RES4LYF Noise Blend] Error creating variation noise sampler: {e}")
-                raise
+            noise_sampler_var = noise_generator_class(
+                x=latent_image[i:i+1], 
+                seed=var_seed + i, 
+                sigma_min=sigmin, 
+                sigma_max=sigmax
+            )
             
             if hasattr(noise_sampler_var, 'alpha'):
                 noise_sampler_var.alpha = alpha
+            if hasattr(noise_sampler_var, 'k'):
                 noise_sampler_var.k = k
-                if hasattr(noise_sampler_var, 'scale'):
-                    noise_sampler_var.scale = 0.1
+            if hasattr(noise_sampler_var, 'scale'):
+                noise_sampler_var.scale = 0.1
             
             var_noise = noise_sampler_var(sigma=sigmax, sigma_next=sigmin)
             
